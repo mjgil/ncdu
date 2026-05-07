@@ -205,6 +205,7 @@ void dir_mem_init(struct dir *_orig) {
 
   dir_output.item = item;
   dir_output.final = final;
+  dir_output_is_export = 0;
   dir_output.size = 0;
   dir_output.items = 0;
 
@@ -213,4 +214,3 @@ void dir_mem_init(struct dir *_orig) {
   if(orig)
     hlink_init(getroot(orig));
 }
-

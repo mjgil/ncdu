@@ -118,6 +118,7 @@ int dir_import_init(const char *fn);
 
 /* The currently configured output functions. */
 extern struct dir_output dir_output;
+extern int dir_output_is_export;
 
 /* Current path that we're working with. These are defined in dir_common.c. */
 extern char *dir_curpath;

@@ -196,8 +196,8 @@ int dir_export_init(const char *fn) {
   pstate = ST_CALC;
   dir_output.item = item;
   dir_output.final = final;
+  dir_output_is_export = 1;
   dir_output.size = 0;
   dir_output.items = 0;
   return 0;
 }
-

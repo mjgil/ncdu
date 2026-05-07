@@ -34,6 +34,7 @@
 int (*dir_process)(void);
 char *dir_curpath;   /* Full path of the last seen item. */
 struct dir_output dir_output;
+int dir_output_is_export;
 char *dir_fatalerr; /* Error message on a fatal error. (NULL if there was no fatal error) */
 int dir_ui = -1;    /* User interface to use */
 static int confirm_quit_while_scanning_stage_1_passed; /* Additional check before quitting */

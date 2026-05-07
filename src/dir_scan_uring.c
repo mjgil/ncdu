@@ -73,7 +73,6 @@ struct scan_node {
 
 struct scan_entry {
   char *name;
-  char *full_path;
   struct stat st;
   int st_ok;
   int st_errno;
@@ -410,7 +409,6 @@ static void free_entries(struct scan_entry *entries, size_t count) {
 
   for(i=0; i<count; i++) {
     free(entries[i].name);
-    free(entries[i].full_path);
   }
   free(entries);
 }
@@ -504,8 +502,9 @@ static int should_recurse(struct scan_node *node) {
 }
 
 
-static struct scan_node *scan_item(struct scan_ctx *ctx, int parentfd, struct scan_entry *entry, int *childfd_out) {
-  struct scan_node *node = node_create(entry->name, entry->full_path);
+static struct scan_node *scan_item(struct scan_ctx *ctx, int parentfd, const char *parent_path, struct scan_entry *entry, int *childfd_out) {
+  char *full_path = join_path(parent_path, entry->name);
+  struct scan_node *node = node_create(entry->name, full_path);
   struct stat follow;
   int childfd = -1;
 
@@ -514,17 +513,20 @@ static struct scan_node *scan_item(struct scan_ctx *ctx, int parentfd, struct sc
 #ifdef __CYGWIN__
   if(strchr(entry->name, '/') || strchr(entry->name, '\\')) {
     node->item.flags |= FF_ERR;
+    free(full_path);
     return node;
   }
 #endif
 
-  if(exclude_match(entry->full_path)) {
+  if(exclude_match(full_path)) {
     node->item.flags |= FF_EXL;
+    free(full_path);
     return node;
   }
 
   if(!entry->st_ok) {
     node->item.flags |= FF_ERR;
+    free(full_path);
     return node;
   }
 
@@ -589,6 +591,7 @@ static struct scan_node *scan_item(struct scan_ctx *ctx, int parentfd, struct sc
 
   if(childfd >= 0)
     close(childfd);
+  free(full_path);
   return node;
 }
 
@@ -610,14 +613,11 @@ static int scan_directory_tree(struct scan_ctx *ctx, struct scan_node *node, int
   if(fail)
     node->item.flags |= FF_ERR;
 
-  for(i=0; i<count; i++)
-    entries[i].full_path = join_path(node->full_path, entries[i].name);
-
   scan_entries(dirfd, ctx, entries, count);
 
   pending = xcalloc(count ? count : 1, sizeof(*pending));
   for(i=0; i<count && !ctx->abort_requested; i++) {
-    pending[i].node = scan_item(ctx, dirfd, &entries[i], &pending[i].fd);
+    pending[i].node = scan_item(ctx, dirfd, node->full_path, &entries[i], &pending[i].fd);
     node_add_child(node, pending[i].node);
 #if HAVE_PTHREAD
     if(pending[i].fd >= 0 && ctx->parallel_enabled && try_acquire_worker()) {
@@ -694,14 +694,11 @@ static int scan_directory_stream(struct scan_ctx *ctx, struct scan_node *node, i
     if(fail)
       node->item.flags |= FF_ERR;
 
-    for(i=0; i<count; i++)
-      entries[i].full_path = join_path(node->full_path, entries[i].name);
-
     scan_entries(dirfd, ctx, entries, count);
 
     pending = xcalloc(count ? count : 1, sizeof(*pending));
     for(i=0; i<count && !ctx->abort_requested; i++) {
-      pending[i].node = scan_item(ctx, dirfd, &entries[i], &pending[i].fd);
+      pending[i].node = scan_item(ctx, dirfd, node->full_path, &entries[i], &pending[i].fd);
 #if HAVE_PTHREAD
       if(pending[i].fd >= 0 && ctx->parallel_enabled && try_acquire_worker()) {
         struct scan_job *job = xmalloc(sizeof(*job));
@@ -788,7 +785,7 @@ static int process(void) {
   memset(&ctx, 0, sizeof(ctx));
   ctx.uring_enabled = scan_uring_enabled;
 #if HAVE_PTHREAD
-  ctx.parallel_enabled = scan_parallel_enabled;
+  ctx.parallel_enabled = scan_parallel_enabled && !dir_output_is_export;
   active_threads = 0;
   max_threads = 0;
   {
@@ -832,6 +829,10 @@ static int process(void) {
 
 
 void dir_scan_uring_init(const char *path, int enable_uring, int enable_parallel) {
+  if(dir_output_is_export) {
+    dir_scan_init(path);
+    return;
+  }
   scan_uring_enabled = enable_uring;
   scan_parallel_enabled = enable_parallel;
   dir_curpath_set(path);
