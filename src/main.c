@@ -455,7 +455,7 @@ static void argv_parse(int argc, char **argv) {
     if(dir_import_init(import)) die("Can't open %s: %s\n", import, strerror(errno));
     if(strcmp(import, "-") == 0) ncurses_tty = 1;
   } else
-    dir_scan_init(dir ? dir : ".");
+    dir_scan_uring_init(dir ? dir : ".", 1, 1);
 
   /* Use the single-line scan feedback by default when exporting to file, no
    * feedback when exporting to stdout. */

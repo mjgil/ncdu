@@ -39,6 +39,19 @@ AC_CHECK_FUNCS([getattrlist])
 
 AC_CHECK_DECLS([ATTR_CMNEXT_NOFIRMLINKPATH], [], [], [[#include <sys/attr.h>]])
 
+PKG_CHECK_MODULES([URING], [liburing], [have_uring=yes], [have_uring=no])
+if test "$have_uring" = "yes"; then
+  AC_DEFINE([HAVE_URING], [1], [Define if liburing is available])
+  CFLAGS="$CFLAGS $URING_CFLAGS"
+  LIBS="$LIBS $URING_LIBS"
+fi
+
+AC_CHECK_HEADERS([pthread.h])
+AC_SEARCH_LIBS([pthread_create], [pthread], [have_pthread=yes], [have_pthread=no])
+if test "$have_pthread" = "yes"; then
+  AC_DEFINE([HAVE_PTHREAD], [1], [Define if pthread support is available])
+fi
+
 # Look for ncurses library to link to
 ncurses=auto
 AC_ARG_WITH([ncurses],

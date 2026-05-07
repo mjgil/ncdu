@@ -109,6 +109,7 @@ extern int (*dir_process)(void);
 extern int dir_scan_smfs;
 extern int exclude_kernfs;
 void dir_scan_init(const char *path);
+void dir_scan_uring_init(const char *path, int enable_uring, int enable_parallel);
 
 /* Importing a file */
 extern int dir_import_active;
