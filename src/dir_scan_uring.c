@@ -416,9 +416,7 @@ static void free_entries(struct scan_entry *entries, size_t count) {
 }
 
 
-static int emit_node(struct scan_node *node) {
-  size_t i;
-
+static int emit_open(struct scan_node *node) {
   if(node->item.flags & FF_ERR)
     dir_setlasterr(node->full_path);
   dir_curpath_set(node->full_path);
@@ -429,18 +427,34 @@ static int emit_node(struct scan_node *node) {
   }
   if(input_handle(1))
     return 1;
+  return 0;
+}
+
+
+static int emit_close(struct scan_node *node) {
+  dir_curpath_set(node->full_path);
+  if(dir_output.item(NULL, 0, NULL, 0)) {
+    dir_seterr("Output error: %s", strerror(errno));
+    return 1;
+  }
+  if(input_handle(1))
+    return 1;
+  return 0;
+}
+
+
+static int emit_node(struct scan_node *node) {
+  size_t i;
+
+  if(emit_open(node))
+    return 1;
 
   if(node->item.flags & FF_DIR) {
     for(i=0; i<node->child_count; i++)
       if(emit_node(node->children[i]))
         return 1;
 
-    dir_curpath_set(node->full_path);
-    if(dir_output.item(NULL, 0, NULL, 0)) {
-      dir_seterr("Output error: %s", strerror(errno));
-      return 1;
-    }
-    if(input_handle(1))
+    if(emit_close(node))
       return 1;
   }
 
@@ -448,7 +462,8 @@ static int emit_node(struct scan_node *node) {
 }
 
 
-static int scan_directory(struct scan_ctx *ctx, struct scan_node *node, int dirfd);
+static int scan_directory_tree(struct scan_ctx *ctx, struct scan_node *node, int dirfd);
+static int scan_directory_stream(struct scan_ctx *ctx, struct scan_node *node, int dirfd);
 
 
 #if HAVE_PTHREAD
@@ -475,7 +490,7 @@ static void release_worker(void) {
 
 static void *scan_job_main(void *arg) {
   struct scan_job *job = arg;
-  scan_directory(job->ctx, job->node, job->fd);
+  scan_directory_tree(job->ctx, job->node, job->fd);
   close(job->fd);
   release_worker();
   return arg;
@@ -578,7 +593,7 @@ static struct scan_node *scan_item(struct scan_ctx *ctx, int parentfd, struct sc
 }
 
 
-static int scan_directory(struct scan_ctx *ctx, struct scan_node *node, int dirfd) {
+static int scan_directory_tree(struct scan_ctx *ctx, struct scan_node *node, int dirfd) {
   struct scan_entry *entries = NULL;
   struct pending_subtree *pending = NULL;
   size_t count = 0, i;
@@ -631,7 +646,7 @@ static int scan_directory(struct scan_ctx *ctx, struct scan_node *node, int dirf
     }
 #endif
     if(pending[i].fd >= 0) {
-      scan_directory(ctx, pending[i].node, pending[i].fd);
+      scan_directory_tree(ctx, pending[i].node, pending[i].fd);
       close(pending[i].fd);
     }
   }
@@ -639,6 +654,126 @@ static int scan_directory(struct scan_ctx *ctx, struct scan_node *node, int dirf
   free_entries(entries, count);
   free(pending);
   return 0;
+}
+
+
+static void pending_cleanup(struct scan_ctx *ctx, struct pending_subtree *pending, size_t count) {
+  size_t i;
+
+  (void)ctx;
+  for(i=0; i<count; i++) {
+#if HAVE_PTHREAD
+    if(pending[i].async) {
+      void *ret = NULL;
+      pthread_join(pending[i].tid, &ret);
+      free(ret);
+      node_free(pending[i].node);
+      continue;
+    }
+#endif
+    if(pending[i].fd >= 0)
+      close(pending[i].fd);
+    node_free(pending[i].node);
+  }
+}
+
+
+static int scan_directory_stream(struct scan_ctx *ctx, struct scan_node *node, int dirfd) {
+  struct scan_entry *entries = NULL;
+  struct pending_subtree *pending = NULL;
+  size_t count = 0, i;
+  int fail = 0;
+  int out_fail = 0;
+
+  if(ctx->abort_requested)
+    return 1;
+
+  if(!read_entries(dirfd, &entries, &count, &fail))
+    node->item.flags |= FF_ERR;
+  else {
+    if(fail)
+      node->item.flags |= FF_ERR;
+
+    for(i=0; i<count; i++)
+      entries[i].full_path = join_path(node->full_path, entries[i].name);
+
+    scan_entries(dirfd, ctx, entries, count);
+
+    pending = xcalloc(count ? count : 1, sizeof(*pending));
+    for(i=0; i<count && !ctx->abort_requested; i++) {
+      pending[i].node = scan_item(ctx, dirfd, &entries[i], &pending[i].fd);
+#if HAVE_PTHREAD
+      if(pending[i].fd >= 0 && ctx->parallel_enabled && try_acquire_worker()) {
+        struct scan_job *job = xmalloc(sizeof(*job));
+        job->ctx = ctx;
+        job->node = pending[i].node;
+        job->fd = pending[i].fd;
+        if(pthread_create(&pending[i].tid, NULL, scan_job_main, job) == 0) {
+          pending[i].async = 1;
+          pending[i].fd = -1;
+        } else {
+          release_worker();
+          free(job);
+        }
+      }
+#endif
+    }
+  }
+
+  if(emit_open(node)) {
+    ctx->abort_requested = 1;
+    out_fail = 1;
+    goto out;
+  }
+
+  for(i=0; i<count && !ctx->abort_requested; i++) {
+#if HAVE_PTHREAD
+    if(pending[i].async) {
+      void *ret = NULL;
+      pthread_join(pending[i].tid, &ret);
+      free(ret);
+      pending[i].async = 0;
+      if(emit_node(pending[i].node)) {
+        ctx->abort_requested = 1;
+        out_fail = 1;
+      }
+      node_free(pending[i].node);
+      pending[i].node = NULL;
+      continue;
+    }
+#endif
+    if(pending[i].fd >= 0) {
+      if(scan_directory_stream(ctx, pending[i].node, pending[i].fd)) {
+        ctx->abort_requested = 1;
+        out_fail = 1;
+      }
+      close(pending[i].fd);
+      pending[i].fd = -1;
+      node_free(pending[i].node);
+      pending[i].node = NULL;
+      continue;
+    }
+    if(pending[i].node) {
+      if(emit_node(pending[i].node)) {
+        ctx->abort_requested = 1;
+        out_fail = 1;
+      }
+      node_free(pending[i].node);
+      pending[i].node = NULL;
+    }
+  }
+
+  if(!ctx->abort_requested && emit_close(node)) {
+    ctx->abort_requested = 1;
+    out_fail = 1;
+  }
+
+out:
+  if(pending)
+    pending_cleanup(ctx, pending, count);
+  free(pending);
+  free_entries(entries, count);
+  return out_fail;
 }
 
 
@@ -682,14 +817,11 @@ static int process(void) {
     ctx.rootdev = (uint64_t)st.st_dev;
     root = node_create(dir_curpath, dir_curpath);
     node_from_stat(root, &st, ctx.rootdev);
-    scan_directory(&ctx, root, dirfd);
+    fail = scan_directory_stream(&ctx, root, dirfd);
   }
 
   if(dirfd >= 0)
     close(dirfd);
-
-  if(!dir_fatalerr && root)
-    fail = emit_node(root);
 
   node_free(root);
 
